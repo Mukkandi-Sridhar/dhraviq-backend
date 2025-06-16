@@ -28,9 +28,11 @@ app.add_middleware(
 )
 
 # ------------------ Health Check ------------------
-@app.get("/health")
+@app.get("/health", include_in_schema=False)
+@app.head("/health")
 def health_check():
-    return {"status": "OK", "message": "Dhraviq backend is live 🔥"}
+    return {"status": "OK", "message": "Dhraviq backend
+
 
 # ------------------ Pushover Test Endpoint ------------------
 @app.get("/test_notification")
