@@ -4,24 +4,46 @@ import os
 from dotenv import load_dotenv
 import logging
 import json
+import asyncio
+import traceback
+from firebase_admin import firestore
 
 # Import functions and initialized clients from agentic_ai_backend.py
 from agentic_ai_backend import (
     run_agents,
     send_pushover_notification,
-    health_check as agent_health_check,  # Alias to avoid naming conflict with FastAPI's @app.get("/health")
-    db,  # Firebase client from agentic_ai_backend
-    gemini_model,  # Gemini model from agentic_ai_backend
+    health_check as agent_health_check,
+    process_agent_response,
+    send_pushover_notification_async,
+    extract_tech_keywords,
+    db,  # Firebase client
+    gemini_model,
     PUSHOVER_TOKEN,
-    PUSHOVER_USER
+    PUSHOVER_USER,
+    AgentRequest  # Assuming AgentRequest is defined here
 )
 
 # ------------------ Load Environment Variables ------------------
 load_dotenv()
 
-# ------------------ Firebase Initialization Check ------------------
-if db is None:
-    raise Exception("Firebase Firestore not initialized. Please check Firebase configuration.")
+# ------------------ Firebase Initialization ------------------
+# Load from Render secret or local file
+secret_path = "/run/secrets/firebase-service-account.json"
+if os.path.exists(secret_path):
+    with open(secret_path, 'r') as f:
+        cred_dict = json.load(f)
+else:
+    local_path = "firebase-service-account.json"
+    with open(local_path, 'r') as f:
+        cred_dict = json.load(f)
+
+import firebase_admin
+from firebase_admin import credentials
+cred = credentials.Certificate(cred_dict)
+if not firebase_admin._apps:
+    firebase_admin.initialize_app(cred)
+db = firestore.client()
+logging.info("Firebase initialized successfully.")
 
 # ------------------ Gemini API Key Check ------------------
 if not os.getenv("GEMINI_API_KEY"):
@@ -43,15 +65,14 @@ ALLOWED_ORIGINS = [
     "https://dhraviq.com",
     "https://www.dhraviq.com",
     "http://localhost:5173",
-    # Add any other origins you need for development or testing
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods (GET, POST, etc.)
-    allow_headers=["*"],  # Allow all headers, including Content-Type, Authorization
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ------------------ Health Check ------------------
@@ -133,19 +154,8 @@ async def run_agents_endpoint(req: AgentRequest):
         raise  # Re-raise FastAPI HTTPExceptions as-is
     except Exception as e:
         logging.error(f"Error occurred during agent processing: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"An unexpected server error occurred: {str(e)}")
-
-# ------------------ Async Notification Helper ------------------
-async def send_pushover_notification_async(user_id: str, question: str, email: Optional[str] = None):
-    """Wrapper to run Pushover notification in background"""
-    try:
-        await asyncio.sleep(1)  # Small delay to ensure main request completes first
-        success = send_pushover_notification(user_id, question, email)
-        if not success:
-            logging.error("Pushover notification failed after async attempt")
-    except Exception as e:
-        logging.error(f"Async notification error: {str(e)}")
         logging.debug(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"An unexpected server error occurred: {str(e)}")
 
 # ------------------ Logging Setup ------------------
 logging.basicConfig(level=logging.DEBUG)
@@ -153,6 +163,4 @@ logging.basicConfig(level=logging.DEBUG)
 # ------------------ App Entry Point (for local development) ------------------
 if __name__ == "__main__":
     import uvicorn
-    # Render uses the command in your "Start Command" field (e.g., uvicorn main:app --host 0.0.0.0 --port $PORT)
-    # This block is primarily for local testing.
     uvicorn.run(app, host="0.0.0.0", port=8000)
