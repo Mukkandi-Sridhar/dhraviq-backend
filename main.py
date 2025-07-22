@@ -16,34 +16,41 @@ from agentic_ai_backend import (
     process_agent_response,
     send_pushover_notification_async,
     extract_tech_keywords,
-    db,  # Firebase client
     gemini_model,
     PUSHOVER_TOKEN,
     PUSHOVER_USER,
-    AgentRequest  # Assuming AgentRequest is defined here
+    AgentRequest
 )
 
 # ------------------ Load Environment Variables ------------------
 load_dotenv()
 
 # ------------------ Firebase Initialization ------------------
+logging.basicConfig(level=logging.DEBUG)
+
 # Load from Render secret or local file
 secret_path = "/run/secrets/firebase-service-account.json"
 if os.path.exists(secret_path):
+    logging.debug("Loading Firebase credentials from Render secret.")
     with open(secret_path, 'r') as f:
         cred_dict = json.load(f)
 else:
     local_path = "firebase-service-account.json"
+    logging.debug(f"Loading Firebase credentials from local file: {local_path}")
     with open(local_path, 'r') as f:
         cred_dict = json.load(f)
 
-import firebase_admin
-from firebase_admin import credentials
-cred = credentials.Certificate(cred_dict)
-if not firebase_admin._apps:
-    firebase_admin.initialize_app(cred)
-db = firestore.client()
-logging.info("Firebase initialized successfully.")
+try:
+    import firebase_admin
+    from firebase_admin import credentials
+    cred = credentials.Certificate(cred_dict)
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app(cred)
+    db = firestore.client()
+    logging.info("Firebase initialized successfully.")
+except Exception as e:
+    logging.error(f"Firebase initialization failed: {str(e)}")
+    raise Exception("Firebase initialization failed. Check logs and service account key.")
 
 # ------------------ Gemini API Key Check ------------------
 if not os.getenv("GEMINI_API_KEY"):
@@ -151,14 +158,11 @@ async def run_agents_endpoint(req: AgentRequest):
         }
 
     except HTTPException:
-        raise  # Re-raise FastAPI HTTPExceptions as-is
+        raise
     except Exception as e:
         logging.error(f"Error occurred during agent processing: {str(e)}")
         logging.debug(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"An unexpected server error occurred: {str(e)}")
-
-# ------------------ Logging Setup ------------------
-logging.basicConfig(level=logging.DEBUG)
 
 # ------------------ App Entry Point (for local development) ------------------
 if __name__ == "__main__":
