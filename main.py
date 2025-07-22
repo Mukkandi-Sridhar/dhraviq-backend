@@ -1,64 +1,11 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from agentic_ai_backend import run_agents, send_pushover_notification
 import os
 from dotenv import load_dotenv
-import logging
-import json
-import asyncio
-import traceback
-from firebase_admin import firestore
 
-# Import functions and initialized clients from agentic_ai_backend.py
-from agentic_ai_backend import (
-    run_agents,
-    send_pushover_notification,
-    health_check as agent_health_check,
-    process_agent_response,
-    send_pushover_notification_async,
-    extract_tech_keywords,
-    gemini_model,
-    PUSHOVER_TOKEN,
-    PUSHOVER_USER,
-    AgentRequest
-)
-
-# ------------------ Load Environment Variables ------------------
+# ------------------ Load Environment ------------------
 load_dotenv()
-
-# ------------------ Firebase Initialization ------------------
-logging.basicConfig(level=logging.DEBUG)
-
-# Load from Render secret or local file
-secret_path = "/run/secrets/firebase-service-account.json"
-if os.path.exists(secret_path):
-    logging.debug("Loading Firebase credentials from Render secret.")
-    with open(secret_path, 'r') as f:
-        cred_dict = json.load(f)
-else:
-    local_path = "firebase-service-account.json"
-    logging.debug(f"Loading Firebase credentials from local file: {local_path}")
-    with open(local_path, 'r') as f:
-        cred_dict = json.load(f)
-
-try:
-    import firebase_admin
-    from firebase_admin import credentials
-    cred = credentials.Certificate(cred_dict)
-    if not firebase_admin._apps:
-        firebase_admin.initialize_app(cred)
-    db = firestore.client()
-    logging.info("Firebase initialized successfully.")
-except Exception as e:
-    logging.error(f"Firebase initialization failed: {str(e)}")
-    raise Exception("Firebase initialization failed. Check logs and service account key.")
-
-# ------------------ Gemini API Key Check ------------------
-if not os.getenv("GEMINI_API_KEY"):
-    raise Exception("Gemini API key is missing. Please check environment variables.")
-
-# ------------------ Pushover Token/User Check ------------------
-if not PUSHOVER_TOKEN or not PUSHOVER_USER:
-    raise Exception("Pushover credentials are missing. Please check environment variables.")
 
 # ------------------ FastAPI App ------------------
 app = FastAPI(
@@ -68,6 +15,7 @@ app = FastAPI(
 )
 
 # ------------------ CORS Middleware ------------------
+# Allow both production and local development domains
 ALLOWED_ORIGINS = [
     "https://dhraviq.com",
     "https://www.dhraviq.com",
@@ -85,16 +33,15 @@ app.add_middleware(
 # ------------------ Health Check ------------------
 @app.get("/health", include_in_schema=False)
 @app.head("/health")
-async def health_endpoint():
-    logging.info("Health check started.")
-    result = await agent_health_check()
-    logging.info(f"Health check result: {result}")
-    return result
+def health_check():
+    return {
+        "status": "OK",
+        "message": "Dhraviq backend is live 🔥"
+    }
 
 # ------------------ Pushover Notification Test ------------------
 @app.get("/test_notification", tags=["Diagnostics"])
-def test_notification_endpoint():
-    """Test endpoint for sending a Pushover notification."""
+def test_notification():
     success = send_pushover_notification(
         user_id="test-user",
         question="This is a test notification from /test_notification",
@@ -109,62 +56,4 @@ def test_notification_endpoint():
     }
 
 # ------------------ Run Agents Endpoint ------------------
-@app.post("/run_agents", tags=["Core Agents"])
-async def run_agents_endpoint(req: AgentRequest):
-    try:
-        # Step 1: Run agents in parallel
-        tasks = [process_agent_response(agent, req.question) for agent in req.agents]
-        results = await asyncio.gather(*tasks)
-        responses = {r["agent"]: r["response"] for r in results}
-
-        # Step 2: Store session as usual
-        session_ref = db.collection("sessions").document()
-        session_data = {
-            "userId": req.userId,
-            "question": req.question,
-            "agents": req.agents,
-            "responses": responses,
-            "createdAt": firestore.SERVER_TIMESTAMP,
-            "isTechnical": any(r["isTechnical"] for r in results),
-            "technicalKeywords": extract_tech_keywords(req.question)
-        }
-        session_ref.set(session_data)
-
-        # Step 3: If reminders are enabled, save question and send notification
-        if req.send_email:
-            user_ref = db.collection("users").document(req.userId)
-            user_ref.set({
-                "reminderEnabled": True,
-                "reminderQuestion": req.question.strip(),
-                "lastUpdated": firestore.SERVER_TIMESTAMP,
-                "email": req.email if req.email else None
-            }, merge=True)
-
-            logging.info(f"✅ reminderQuestion saved: {req.question}")
-
-            # Send Pushover notification asynchronously
-            asyncio.create_task(
-                send_pushover_notification_async(
-                    req.userId,
-                    req.question,
-                    req.email
-                )
-            )
-
-        return {
-            "status": "success",
-            "sessionId": session_ref.id,
-            "responses": responses
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error(f"Error occurred during agent processing: {str(e)}")
-        logging.debug(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"An unexpected server error occurred: {str(e)}")
-
-# ------------------ App Entry Point (for local development) ------------------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+app.post("/run_agents", tags=["Core Agents"])(run_agents)
