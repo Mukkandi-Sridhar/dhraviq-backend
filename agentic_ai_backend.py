@@ -15,7 +15,7 @@ import requests
 load_dotenv()
 
 # Firebase Initialization
-cred = credentials.Certificate("firebase_credentials.json")
+cred = credentials.Certificate("/etc/secrets/firebase_credentials.json")
 if not firebase_admin._apps:
     firebase_admin.initialize_app(cred)
 db = firestore.client()
