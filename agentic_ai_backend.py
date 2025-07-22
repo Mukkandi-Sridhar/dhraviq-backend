@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict
 import asyncio
 import os
-import json # New import for handling JSON string
+import json
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import firestore, initialize_app, credentials
@@ -13,47 +13,48 @@ from datetime import datetime
 import requests
 
 # ------------------ Load Environment Variables ------------------
-# Ensure this is loaded before any os.getenv calls are made
 load_dotenv()
 
+# Global variables for initialized clients
+db = None
+gemini_model = None
+PUSHOVER_TOKEN = None
+PUSHOVER_USER = None
+
 # ------------------ Firebase Initialization ------------------
-# Get Firebase service account key from environment variable
 FIREBASE_SERVICE_ACCOUNT_KEY_JSON = os.getenv('FIREBASE_SERVICE_ACCOUNT_KEY')
 
 if FIREBASE_SERVICE_ACCOUNT_KEY_JSON:
     try:
-        # Parse the JSON string from the environment variable
         cred_dict = json.loads(FIREBASE_SERVICE_ACCOUNT_KEY_JSON)
         cred = credentials.Certificate(cred_dict)
-        # Initialize Firebase Admin SDK only once
         if not firebase_admin._apps:
             initialize_app(cred)
         db = firestore.client()
         print("Firebase Admin SDK initialized successfully from environment variable.")
     except json.JSONDecodeError as e:
-        print(f"Error decoding FIREBASE_SERVICE_ACCOUNT_KEY JSON: {e}")
+        print(f"CRITICAL ERROR: Error decoding FIREBASE_SERVICE_ACCOUNT_KEY JSON: {e}")
         print("Please ensure the FIREBASE_SERVICE_ACCOUNT_KEY environment variable on Render contains valid JSON.")
-        raise Exception(f"Firebase JSON decode error: {e}") # Raise to halt deployment if invalid
+        # Do NOT raise here if you want the app to start but report unavailable services
+        # raise Exception(f"Firebase JSON decode error: {e}")
     except Exception as e:
-        print(f"Error during Firebase Admin SDK initialization: {e}")
-        raise Exception(f"Firebase initialization failed: {e}") # Raise to halt deployment if invalid
+        print(f"CRITICAL ERROR: Error during Firebase Admin SDK initialization: {e}")
+        # Do NOT raise here if you want the app to start but report unavailable services
+        # raise Exception(f"Firebase initialization failed: {e}")
 else:
-    print("WARNING: FIREBASE_SERVICE_ACCOUNT_KEY environment variable not found.")
-    print("Firebase Admin SDK will NOT be initialized. Firestore operations will fail.")
-    # In a production setup, you might want to raise an exception here
-    # to prevent the application from running without critical credentials.
-    # For now, we'll let it proceed but expect Firestore errors.
-    db = None # Set db to None if not initialized
-    raise Exception("FIREBASE_SERVICE_ACCOUNT_KEY environment variable is missing. Cannot initialize Firebase.")
-
+    print("WARNING: FIREBASE_SERVICE_ACCOUNT_KEY environment variable not found. Firestore operations will be unavailable.")
 
 # Gemini Model Setup
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    print("WARNING: GEMINI_API_KEY environment variable not found.")
-    raise Exception("GEMINI_API_KEY environment variable is missing. Gemini will not work.")
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-1.5-pro")
+if GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel("gemini-1.5-pro")
+        print("Gemini model configured successfully.")
+    except Exception as e:
+        print(f"CRITICAL ERROR: Error configuring Gemini model: {e}")
+else:
+    print("WARNING: GEMINI_API_KEY environment variable not found. Gemini will be unavailable.")
 
 # Pushover Configuration
 PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN")
@@ -118,14 +119,14 @@ def send_pushover_notification(user_id: str, question: str, email: Optional[str]
                 "user": PUSHOVER_USER,
                 "message": message,
                 "title": "New User Question",
-                "priority": 0,  # Normal priority
-                "sound": "magic",  # Custom notification sound
-                "html": 1  # Enable basic HTML formatting
+                "priority": 0,
+                "sound": "magic",
+                "html": 1
             },
-            timeout=10  # 10 second timeout
+            timeout=10
         )
 
-        response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
+        response.raise_for_status()
         return True
     except requests.exceptions.RequestException as e:
         print(f"Pushover notification failed: {str(e)}")
@@ -137,6 +138,14 @@ def send_pushover_notification(user_id: str, question: str, email: Optional[str]
 # ------------------ Agent Response Generator ------------------
 async def process_agent_response(agent: str, question: str) -> Dict:
     """LLM decides if response should be a brief greeting or detailed help"""
+    if gemini_model is None:
+        print(f"Agent {agent} error: Gemini model not initialized.")
+        return {
+            "agent": agent,
+            "response": f"⚠️ {agent} is currently unavailable because the AI model could not be loaded. Please try again later.",
+            "isTechnical": False
+        }
+
     try:
         specialization = AGENT_SPECIALIZATIONS.get(agent, {
             "name": agent,
@@ -175,26 +184,31 @@ async def process_agent_response(agent: str, question: str) -> Dict:
         return {
             "agent": agent,
             "response": response.text,
-            "isTechnical": True # Assuming agent responses are generally technical
+            "isTechnical": True
         }
 
     except Exception as e:
-        print(f"Agent {agent} error: {e}")
-        traceback.print_exc() # Print full traceback for agent errors
+        print(f"Agent {agent} error during content generation: {e}")
+        traceback.print_exc()
         return {
             "agent": agent,
-            "response": f"⚠️ {agent} is currently unavailable due to an internal error. Please try again later.",
+            "response": f"⚠️ {agent} is currently experiencing issues. Please try again later.",
             "isTechnical": False
         }
 
 # ------------------ Main Endpoint Logic ------------------
 async def run_agents(req: AgentRequest):
     try:
+        # Check critical dependencies first
         if db is None:
-            raise HTTPException(500, detail="Firestore client not initialized. Check Firebase credentials.")
+            print("Run Agents: Firestore client is not initialized. Cannot proceed.")
+            raise HTTPException(status_code=503, detail="Service Unavailable: Database connection failed during startup.")
+        if gemini_model is None:
+            print("Run Agents: Gemini model is not initialized. Cannot proceed.")
+            raise HTTPException(status_code=503, detail="Service Unavailable: AI model initialization failed during startup.")
 
         if len(req.agents) > 5:
-            raise HTTPException(400, detail="Maximum 5 agents allowed")
+            raise HTTPException(status_code=400, detail="Maximum 5 agents allowed")
 
         # Step 1: Run agents in parallel
         tasks = [process_agent_response(agent, req.question) for agent in req.agents]
@@ -202,39 +216,56 @@ async def run_agents(req: AgentRequest):
         responses = {r["agent"]: r["response"] for r in results}
 
         # Step 2: Store session as usual
-        session_ref = db.collection("sessions").document()
-        session_data = {
-            "userId": req.userId,
-            "question": req.question,
-            "agents": req.agents,
-            "responses": responses,
-            "createdAt": firestore.SERVER_TIMESTAMP,
-            "isTechnical": any(r["isTechnical"] for r in results),
-            "technicalKeywords": extract_tech_keywords(req.question)
-        }
-        session_ref.set(session_data) # This is line 181 from your original trace
+        try:
+            session_ref = db.collection("sessions").document()
+            session_data = {
+                "userId": req.userId,
+                "question": req.question,
+                "agents": req.agents,
+                "responses": responses,
+                "createdAt": firestore.SERVER_TIMESTAMP,
+                "isTechnical": any(r["isTechnical"] for r in results),
+                "technicalKeywords": extract_tech_keywords(req.question)
+            }
+            session_ref.set(session_data)
+        except Exception as e:
+            print(f"Error storing session in Firestore: {e}")
+            traceback.print_exc()
+            # Decide if you want to completely fail or just log and continue
+            # For now, we'll return a partial success but indicate DB issue
+            return {
+                "status": "partial_success",
+                "sessionId": "N/A",
+                "responses": responses,
+                "message": "Responses generated, but failed to save session to database."
+            }
+
 
         # Step 3: If reminders are enabled, save question and send notification
         if req.send_email:
-            user_ref = db.collection("users").document(req.userId)
-            user_ref.set({
-                "reminderEnabled": True,
-                "reminderQuestion": req.question.strip(),
-                "lastUpdated": firestore.SERVER_TIMESTAMP,
-                "email": req.email if req.email else None
-            }, merge=True)
+            try:
+                user_ref = db.collection("users").document(req.userId)
+                user_ref.set({
+                    "reminderEnabled": True,
+                    "reminderQuestion": req.question.strip(),
+                    "lastUpdated": firestore.SERVER_TIMESTAMP,
+                    "email": req.email if req.email else None
+                }, merge=True)
 
-            print(f"✅ reminderQuestion saved: {req.question}")
+                print(f"✅ reminderQuestion saved: {req.question}")
 
-            # Send Pushover notification in background
-            # Note: asyncio.create_task requires an async function
-            asyncio.create_task(
-                send_pushover_notification_async(
-                    req.userId,
-                    req.question,
-                    req.email
+                asyncio.create_task(
+                    send_pushover_notification_async(
+                        req.userId,
+                        req.question,
+                        req.email
+                    )
                 )
-            )
+            except Exception as e:
+                print(f"Error saving user reminder/sending notification: {e}")
+                traceback.print_exc()
+                # Continue processing main request, but log this failure
+                pass # Don't raise, as agent responses are already generated
 
         return {
             "status": "success",
@@ -245,15 +276,14 @@ async def run_agents(req: AgentRequest):
     except HTTPException:
         raise # Re-raise FastAPI HTTPExceptions as-is
     except Exception as e:
-        traceback.print_exc() # Print full traceback for unexpected errors
-        raise HTTPException(500, detail=f"An unexpected server error occurred: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"An unexpected server error occurred: {str(e)}")
 
 # ------------------ Async Notification Helper ------------------
 async def send_pushover_notification_async(user_id: str, question: str, email: Optional[str] = None):
     """Wrapper to run Pushover notification in background"""
     try:
-        # Small delay to ensure main request completes first
-        await asyncio.sleep(1)
+        await asyncio.sleep(1) # Small delay to ensure main request completes first
         success = send_pushover_notification(user_id, question, email)
         if not success:
             print("Pushover notification failed after async attempt")
@@ -278,43 +308,55 @@ async def health_check():
     pushover_status = "unavailable"
     gemini_status = "unavailable"
 
+    # Firestore check
     try:
-        # Test Firestore connectivity by writing a temporary document
         if db is not None:
+            # Attempt a read/write operation to ensure actual connectivity
             health_ref = db.collection("health_checks").document("api_status")
-            health_ref.set({"last_checked": firestore.SERVER_TIMESTAMP, "status": "ok"})
-            firestore_status = "connected"
+            health_ref.set({"last_checked": firestore.SERVER_TIMESTAMP, "status": "ok_from_health_check"})
+            # Optionally, read it back to confirm
+            health_doc = await asyncio.to_thread(health_ref.get) # Run blocking get in a thread
+            if health_doc.exists:
+                firestore_status = "connected"
+            else:
+                firestore_status = "doc_not_found_after_write" # Should not happen if set succeeds
         else:
             firestore_status = "initialization_failed"
-
     except Exception as e:
         print(f"Firestore health check failed: {e}")
+        traceback.print_exc() # Print traceback for health check failures
         firestore_status = f"error: {str(e)}"
 
+    # Gemini check
     try:
-        # Test Gemini connectivity (a simple query)
-        # Note: A real health check for LLMs might be more robust
-        test_gemini_response = gemini_model.generate_content("hello")
-        if test_gemini_response.text:
-            gemini_status = "available"
+        if gemini_model is not None:
+            test_gemini_response = gemini_model.generate_content("hello", generation_config={"max_output_tokens": 10})
+            if test_gemini_response.text:
+                gemini_status = "available"
+            else:
+                gemini_status = "no_response"
         else:
-            gemini_status = "no_response"
+            gemini_status = "initialization_failed"
     except Exception as e:
         print(f"Gemini health check failed: {e}")
+        traceback.print_exc()
         gemini_status = f"error: {str(e)}"
 
-    # Test Pushover connectivity
+    # Pushover check
     pushover_ok = send_pushover_notification(
-        user_id="health-check",
+        user_id="health-check-notification",
         question="This is a test notification from the backend health check.",
         email="health@example.com"
     )
     pushover_status = "connected" if pushover_ok else "unavailable"
 
+    # Determine overall status
+    overall_status = "healthy"
+    if firestore_status != "connected" or gemini_status != "available" or pushover_status != "connected":
+        overall_status = "unhealthy"
 
-    # Return comprehensive status
     return {
-        "status": "healthy" if firestore_status == "connected" and gemini_status == "available" and pushover_status != "unavailable" else "unhealthy",
+        "status": overall_status,
         "services": {
             "firestore": firestore_status,
             "gemini": gemini_status,
