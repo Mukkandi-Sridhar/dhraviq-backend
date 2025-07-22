@@ -12,9 +12,11 @@ import traceback
 from datetime import datetime
 import requests
 import logging
+import time
 
 # ------------------ Load Environment Variables ------------------
 load_dotenv()
+logging.basicConfig(level=logging.DEBUG)
 
 # Global variables for initialized clients
 db = None
@@ -24,6 +26,7 @@ PUSHOVER_USER = None
 
 # ------------------ Firebase Initialization ------------------
 FIREBASE_SERVICE_ACCOUNT_KEY_JSON = os.getenv('FIREBASE_SERVICE_ACCOUNT_KEY')
+logging.debug(f"FIREBASE_SERVICE_ACCOUNT_KEY_JSON loaded: {FIREBASE_SERVICE_ACCOUNT_KEY_JSON is not None}")
 
 # Initialize Firebase client
 if FIREBASE_SERVICE_ACCOUNT_KEY_JSON:
@@ -34,6 +37,7 @@ if FIREBASE_SERVICE_ACCOUNT_KEY_JSON:
             initialize_app(cred)
         db = firestore.client()
         logging.info("Firebase Admin SDK initialized successfully from environment variable.")
+        logging.debug("Firebase app initialized with credentials.")
     except json.JSONDecodeError as e:
         logging.error(f"CRITICAL ERROR: Error decoding FIREBASE_SERVICE_ACCOUNT_KEY JSON: {e}")
         db = None  # Set db to None to indicate initialization failure
@@ -45,10 +49,13 @@ else:
 
 # ------------------ Gemini Model Setup ------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+logging.debug(f"GEMINI_API_KEY loaded: {GEMINI_API_KEY is not None}")
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         gemini_model = genai.GenerativeModel("gemini-1.5-pro")
+        test_response = gemini_model.generate_content("Test")
+        logging.debug(f"Gemini test response: {test_response.text}")
         logging.info("Gemini model configured successfully.")
     except Exception as e:
         logging.error(f"CRITICAL ERROR: Error configuring Gemini model: {e}")
@@ -59,6 +66,7 @@ else:
 # ------------------ Pushover Configuration ------------------
 PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN")
 PUSHOVER_USER = os.getenv("PUSHOVER_USER")
+logging.debug(f"PUSHOVER_TOKEN loaded: {PUSHOVER_TOKEN is not None}, PUSHOVER_USER loaded: {PUSHOVER_USER is not None}")
 if not PUSHOVER_TOKEN or not PUSHOVER_USER:
     logging.warning("WARNING: Pushover API keys (PUSHOVER_TOKEN, PUSHOVER_USER) not found. Notifications will not work.")
 
@@ -134,6 +142,10 @@ def send_pushover_notification(user_id: str, question: str, email: Optional[str]
         logging.error(f"Unexpected error sending Pushover notification: {str(e)}")
         return False
 
+async def send_pushover_notification_async(user_id: str, question: str, email: Optional[str] = None):
+    """Asynchronous wrapper for Pushover notification"""
+    await asyncio.to_thread(send_pushover_notification, user_id, question, email)
+
 # ------------------ Agent Response Generator ------------------
 async def process_agent_response(agent: str, question: str) -> Dict:
     """LLM decides if response should be a brief greeting or detailed help"""
@@ -171,14 +183,25 @@ async def process_agent_response(agent: str, question: str) -> Dict:
             "Your Response:"
         )
 
-        response = gemini_model.generate_content(
-            prompt,
-            generation_config={
-                "temperature": 0.3,
-                "top_p": 0.95,
-                "max_output_tokens": 2048
-            }
-        )
+        # Retry logic for Gemini API
+        for attempt in range(3):
+            try:
+                response = gemini_model.generate_content(
+                    prompt,
+                    generation_config={
+                        "temperature": 0.3,
+                        "top_p": 0.95,
+                        "max_output_tokens": 2048
+                    }
+                )
+                break
+            except Exception as e:
+                if attempt < 2:
+                    wait_time = 2 ** attempt
+                    logging.warning(f"Retry {attempt + 1}/3 after {wait_time} sec due to: {e}")
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise
 
         return {
             "agent": agent,
@@ -226,6 +249,7 @@ async def run_agents(req: AgentRequest):
             "technicalKeywords": extract_tech_keywords(req.question)
         }
         session_ref.set(session_data)
+        logging.debug(f"Session data written to {session_ref.id}")
 
         # Step 3: If reminders are enabled, save question and send notification
         if req.send_email:
