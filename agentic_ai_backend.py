@@ -1,4 +1,4 @@
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 import asyncio
@@ -12,7 +12,6 @@ import traceback
 from datetime import datetime
 import requests
 import logging
-import time
 
 # ------------------ Load Environment Variables ------------------
 load_dotenv()
@@ -25,27 +24,27 @@ PUSHOVER_TOKEN = None
 PUSHOVER_USER = None
 
 # ------------------ Firebase Initialization ------------------
-FIREBASE_SERVICE_ACCOUNT_KEY_JSON = os.getenv('FIREBASE_SERVICE_ACCOUNT_KEY')
-logging.debug(f"FIREBASE_SERVICE_ACCOUNT_KEY_JSON loaded: {FIREBASE_SERVICE_ACCOUNT_KEY_JSON is not None}")
-
-# Initialize Firebase client
-if FIREBASE_SERVICE_ACCOUNT_KEY_JSON:
-    try:
-        cred_dict = json.loads(FIREBASE_SERVICE_ACCOUNT_KEY_JSON)
-        cred = credentials.Certificate(cred_dict)
-        if not firebase_admin._apps:
-            initialize_app(cred)
-        db = firestore.client()
-        logging.info("Firebase Admin SDK initialized successfully from environment variable.")
-        logging.debug("Firebase app initialized with credentials.")
-    except json.JSONDecodeError as e:
-        logging.error(f"CRITICAL ERROR: Error decoding FIREBASE_SERVICE_ACCOUNT_KEY JSON: {e}")
-        db = None  # Set db to None to indicate initialization failure
-    except Exception as e:
-        logging.error(f"CRITICAL ERROR: Error during Firebase Admin SDK initialization: {e}")
-        db = None  # Set db to None to indicate initialization failure
+# Load from Render secret or local file
+secret_path = "/run/secrets/firebase-service-account.json"
+if os.path.exists(secret_path):
+    logging.debug("Loading Firebase credentials from Render secret.")
+    with open(secret_path, 'r') as f:
+        cred_dict = json.load(f)
 else:
-    logging.warning("FIREBASE_SERVICE_ACCOUNT_KEY environment variable not found. Firestore operations will be unavailable.")
+    local_path = "firebase-service-account.json"
+    logging.debug(f"Loading Firebase credentials from local file: {local_path}")
+    with open(local_path, 'r') as f:
+        cred_dict = json.load(f)
+
+try:
+    cred = credentials.Certificate(cred_dict)
+    if not firebase_admin._apps:
+        initialize_app(cred)
+    db = firestore.client()
+    logging.info("Firebase initialized successfully.")
+except Exception as e:
+    logging.error(f"Firebase initialization failed: {str(e)}")
+    db = None  # Set to None but allow app to proceed with error response
 
 # ------------------ Gemini Model Setup ------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -58,17 +57,17 @@ if GEMINI_API_KEY:
         logging.debug(f"Gemini test response: {test_response.text}")
         logging.info("Gemini model configured successfully.")
     except Exception as e:
-        logging.error(f"CRITICAL ERROR: Error configuring Gemini model: {e}")
-        gemini_model = None  # Set gemini_model to None if initialization fails
+        logging.error(f"Gemini initialization failed: {str(e)}")
+        gemini_model = None
 else:
-    logging.warning("GEMINI_API_KEY environment variable not found. Gemini will be unavailable.")
+    logging.warning("GEMINI_API_KEY not found. Gemini will be unavailable.")
 
 # ------------------ Pushover Configuration ------------------
 PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN")
 PUSHOVER_USER = os.getenv("PUSHOVER_USER")
 logging.debug(f"PUSHOVER_TOKEN loaded: {PUSHOVER_TOKEN is not None}, PUSHOVER_USER loaded: {PUSHOVER_USER is not None}")
 if not PUSHOVER_TOKEN or not PUSHOVER_USER:
-    logging.warning("WARNING: Pushover API keys (PUSHOVER_TOKEN, PUSHOVER_USER) not found. Notifications will not work.")
+    logging.warning("Pushover credentials not set. Notifications will not work.")
 
 # ------------------ Request Schema ------------------
 class AgentRequest(BaseModel):
@@ -82,43 +81,41 @@ class AgentRequest(BaseModel):
 AGENT_SPECIALIZATIONS = {
     "GoalClarifier": {
         "name": "Goal Clarifier",
-        "focus": "Helps users define clear, structured, and meaningful SMART goals aligned with their personal or professional direction.",
-        "technical": "Breaks down vague ambitions into specific, measurable, achievable, relevant, and time-bound components using proven goal-setting methodologies."
+        "focus": "Helps users define clear, structured, and meaningful SMART goals.",
+        "technical": "Breaks down goals into SMART components."
     },
     "SkillMap": {
         "name": "Skill Map",
-        "focus": "Assists users in identifying essential skills required to achieve their goals or succeed in a specific field.",
-        "technical": "Maps out skill gaps and recommends personalized learning paths including online courses, books, certifications, and project-based practices."
+        "focus": "Identifies skills needed for user goals.",
+        "technical": "Recommends learning paths and resources."
     },
     "TimelineWizard": {
         "name": "Timeline Wizard",
-        "focus": "Helps users plan realistic and efficient timelines for reaching their defined objectives.",
-        "technical": "Structures work into milestones, sprints, or phases using backward planning, time-blocking, and Gantt-based strategies with buffer and review points."
+        "focus": "Plans realistic timelines for objectives.",
+        "technical": "Uses backward planning and Gantt strategies."
     },
     "ProgressCoach": {
         "name": "Progress Coach",
-        "focus": "Guides users in tracking progress, overcoming stagnation, and sustaining consistent execution over time.",
-        "technical": "Uses behavior tracking, review loops, accountability systems, and adaptive iteration frameworks to maintain focus and course-correct effectively."
+        "focus": "Tracks progress and overcomes stagnation.",
+        "technical": "Implements behavior tracking and review loops."
     },
     "MindsetMentor": {
         "name": "Mindset Mentor",
-        "focus": "Supports users in building a growth-oriented, resilient, and disciplined mental framework aligned with long-term success.",
-        "technical": "Applies cognitive-behavioral tools, habit-loop analysis, identity-shift models, and self-reflection techniques to strengthen motivation and mental clarity."
+        "focus": "Builds a growth-oriented mindset.",
+        "technical": "Applies cognitive-behavioral tools."
     }
 }
 
 # ------------------ Pushover Notification ------------------
 def send_pushover_notification(user_id: str, question: str, email: Optional[str] = None) -> bool:
-    """Send notification to admin via Pushover"""
     if not PUSHOVER_TOKEN or not PUSHOVER_USER:
-        logging.warning("Pushover credentials not set. Skipping notification.")
+        logging.warning("Pushover credentials missing. Skipping notification.")
         return False
 
     try:
-        message = f"New question from user {user_id}:\n\n{question}"
+        message = f"New question from {user_id}:\n{question}"
         if email:
-            message += f"\n\nUser email: {email}"
-
+            message += f"\nEmail: {email}"
         response = requests.post(
             "https://api.pushover.net/1/messages.json",
             data={
@@ -127,117 +124,73 @@ def send_pushover_notification(user_id: str, question: str, email: Optional[str]
                 "message": message,
                 "title": "New User Question",
                 "priority": 0,
-                "sound": "magic",
-                "html": 1
+                "sound": "magic"
             },
             timeout=10
         )
-
         response.raise_for_status()
+        logging.info("Pushover notification sent successfully.")
         return True
     except requests.exceptions.RequestException as e:
         logging.error(f"Pushover notification failed: {str(e)}")
         return False
     except Exception as e:
-        logging.error(f"Unexpected error sending Pushover notification: {str(e)}")
+        logging.error(f"Unexpected Pushover error: {str(e)}")
         return False
 
 async def send_pushover_notification_async(user_id: str, question: str, email: Optional[str] = None):
-    """Asynchronous wrapper for Pushover notification"""
     await asyncio.to_thread(send_pushover_notification, user_id, question, email)
 
 # ------------------ Agent Response Generator ------------------
 async def process_agent_response(agent: str, question: str) -> Dict:
-    """LLM decides if response should be a brief greeting or detailed help"""
     if gemini_model is None:
-        logging.error(f"Agent {agent} error: Gemini model not initialized.")
-        return {
-            "agent": agent,
-            "response": f"⚠️ {agent} is currently unavailable because the AI model could not be loaded. Please try again later.",
-            "isTechnical": False
-        }
+        error_msg = f"⚠️ {agent} unavailable: Gemini model not initialized."
+        logging.error(error_msg)
+        return {"agent": agent, "response": error_msg, "isTechnical": False}
 
     try:
         specialization = AGENT_SPECIALIZATIONS.get(agent, {
-            "name": agent,
-            "focus": "General guidance",
-            "technical": "Provide thoughtful advice"
+            "name": agent, "focus": "General guidance", "technical": "Provide advice"
         })
-
         prompt = (
-            f"You are an expert agent named {specialization['name']}.\n"
-            f"Your role is to help users with the following specialization:\n"
-            f"{specialization['focus']}\n\n"
-            f"Technical expertise: {specialization['technical']}\n\n"
-            f"User Input: \"{question.strip()}\"\n\n"
-            "Instructions:\n"
-            "- If the user input is a casual greeting (like 'hi', 'hello', 'hey'), reply with a short, formal one-line introduction stating your field of expertise.\n"
-            "- If the user input is a topic-specific question related to your domain, give a detailed, insightful, and structured answer.\n"
-            "- Focus strictly on your assigned specialization. Do not generalize or go beyond your expertise.\n"
-            "- Use markdown formatting to enhance clarity:\n"
-            "  • Use **bold** for important keywords or subheadings\n"
-            "  • Use numbered steps or bullet points for methods, frameworks, or strategies\n"
-            "  • Include relevant tools, techniques, or frameworks from your field\n"
-            "- Never ask the user to rephrase their input. Respond constructively and helpfully regardless of input quality.\n"
-            "- Maintain a professional, concise, and informative tone. Avoid casual or motivational language unless the context requires it.\n\n"
-            "Your Response:"
+            f"You are {specialization['name']}.\nFocus: {specialization['focus']}\n"
+            f"Technical: {specialization['technical']}\n\nUser: \"{question}\"\n\n"
+            "Respond with a brief greeting for casual input (e.g., 'hi'), or a detailed answer for questions. Use markdown (**bold**, bullets) and stay within your expertise."
         )
-
-        # Retry logic for Gemini API
-        for attempt in range(3):
-            try:
-                response = gemini_model.generate_content(
-                    prompt,
-                    generation_config={
-                        "temperature": 0.3,
-                        "top_p": 0.95,
-                        "max_output_tokens": 2048
-                    }
-                )
-                break
-            except Exception as e:
-                if attempt < 2:
-                    wait_time = 2 ** attempt
-                    logging.warning(f"Retry {attempt + 1}/3 after {wait_time} sec due to: {e}")
-                    await asyncio.sleep(wait_time)
-                else:
-                    raise
-
-        return {
-            "agent": agent,
-            "response": response.text,
-            "isTechnical": True
-        }
-
+        response = await asyncio.to_thread(
+            lambda: gemini_model.generate_content(prompt).text
+        )
+        return {"agent": agent, "response": response, "isTechnical": True}
     except Exception as e:
-        logging.error(f"Agent {agent} error during content generation: {e}")
+        error_msg = f"⚠️ {agent} error: {str(e)}. Try again later."
+        logging.error(f"Agent {agent} error: {str(e)}")
         logging.debug(traceback.format_exc())
-        return {
-            "agent": agent,
-            "response": f"⚠️ {agent} is currently experiencing issues. Please try again later.",
-            "isTechnical": False
-        }
+        return {"agent": agent, "response": error_msg, "isTechnical": False}
 
 # ------------------ Main Endpoint Logic ------------------
 async def run_agents(req: AgentRequest):
     try:
-        # Check critical dependencies first
+        # Check dependencies
         if db is None:
-            logging.error("Run Agents: Firestore client is not initialized. Cannot proceed.")
-            raise HTTPException(status_code=503, detail="Service Unavailable: Database connection failed during startup.")
+            error_msg = "⚠️ Service unavailable: Database connection failed."
+            logging.error(error_msg)
+            return {"status": "error", "message": error_msg, "sessionId": None, "responses": {}}
         if gemini_model is None:
-            logging.error("Run Agents: Gemini model is not initialized. Cannot proceed.")
-            raise HTTPException(status_code=503, detail="Service Unavailable: AI model initialization failed during startup.")
+            error_msg = "⚠️ Service unavailable: AI model initialization failed."
+            logging.error(error_msg)
+            return {"status": "error", "message": error_msg, "sessionId": None, "responses": {}}
 
         if len(req.agents) > 5:
-            raise HTTPException(status_code=400, detail="Maximum 5 agents allowed")
+            error_msg = "⚠️ Maximum 5 agents allowed."
+            logging.error(error_msg)
+            raise HTTPException(status_code=400, detail=error_msg)
 
-        # Step 1: Run agents in parallel
+        # Run agents in parallel
         tasks = [process_agent_response(agent, req.question) for agent in req.agents]
         results = await asyncio.gather(*tasks)
         responses = {r["agent"]: r["response"] for r in results}
 
-        # Step 2: Store session as usual
+        # Store session
         session_ref = db.collection("sessions").document()
         session_data = {
             "userId": req.userId,
@@ -245,91 +198,72 @@ async def run_agents(req: AgentRequest):
             "agents": req.agents,
             "responses": responses,
             "createdAt": firestore.SERVER_TIMESTAMP,
-            "isTechnical": any(r["isTechnical"] for r in results),
-            "technicalKeywords": extract_tech_keywords(req.question)
+            "isTechnical": any(r["isTechnical"] for r in results)
         }
         session_ref.set(session_data)
-        logging.debug(f"Session data written to {session_ref.id}")
+        logging.debug(f"Session saved: {session_ref.id}")
 
-        # Step 3: If reminders are enabled, save question and send notification
+        # Handle reminders
         if req.send_email:
             user_ref = db.collection("users").document(req.userId)
             user_ref.set({
                 "reminderEnabled": True,
                 "reminderQuestion": req.question.strip(),
                 "lastUpdated": firestore.SERVER_TIMESTAMP,
-                "email": req.email if req.email else None
+                "email": req.email
             }, merge=True)
+            logging.info(f"Reminder saved for {req.userId}")
+            asyncio.create_task(send_pushover_notification_async(req.userId, req.question, req.email))
 
-            logging.info(f"✅ reminderQuestion saved: {req.question}")
+        return {"status": "success", "sessionId": session_ref.id, "responses": responses}
 
-            # Send Pushover notification asynchronously
-            asyncio.create_task(
-                send_pushover_notification_async(
-                    req.userId,
-                    req.question,
-                    req.email
-                )
-            )
-
-        return {
-            "status": "success",
-            "sessionId": session_ref.id,
-            "responses": responses
-        }
-
-    except HTTPException:
-        raise  # Re-raise FastAPI HTTPExceptions as-is
+    except HTTPException as e:
+        logging.error(f"HTTP error: {str(e)}")
+        return {"status": "error", "message": str(e.detail), "sessionId": None, "responses": {}}
     except Exception as e:
-        logging.error(f"Unexpected error during agent processing: {str(e)}")
+        logging.error(f"Unexpected error: {str(e)}")
         logging.debug(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"An unexpected server error occurred: {str(e)}")
+        return {"status": "error", "message": f"⚠️ Unexpected error: {str(e)}. Please try again.", "sessionId": None, "responses": {}}
 
 # ------------------ Keyword Extractor ------------------
 def extract_tech_keywords(text: str) -> List[str]:
-    tech_terms = [
-        'python', 'javascript', 'react', 'node', 'django', 'flask',
-        'machine learning', 'ai', 'data science', 'database',
-        'frontend', 'backend', 'fullstack', 'devops', 'kubernetes', 'docker',
-        'aws', 'azure', 'google cloud', 'gcp', 'algorithms', 'data structures'
-    ]
+    tech_terms = ['python', 'javascript', 'react', 'node', 'django', 'flask', 'machine learning', 'ai']
     return [term for term in tech_terms if term in text.lower()]
 
-# ------------------ Health Check (for external use/monitoring) ------------------
+# ------------------ Health Check ------------------
 async def health_check():
-    """Performs health checks on critical services."""
-    health = {
-        "firestore": "unavailable",
-        "gemini": "unavailable",
-        "pushover": "unavailable"
-    }
-
-    # Firestore Check
+    health = {"firestore": "unavailable", "gemini": "unavailable", "pushover": "unavailable"}
     if db:
         try:
-            health_ref = db.collection("health_checks").document("api_status")
-            health_ref.set({"last_checked": firestore.SERVER_TIMESTAMP, "status": "ok_from_health_check"})
+            db.collection("health_checks").document("api_status").set({"last_checked": firestore.SERVER_TIMESTAMP})
             health["firestore"] = "connected"
         except Exception as e:
             health["firestore"] = f"error: {str(e)}"
-    
-    # Gemini Check
     if gemini_model:
         try:
-            test_gemini_response = gemini_model.generate_content("health check", generation_config={"max_output_tokens": 10})
-            if test_gemini_response.text:
-                health["gemini"] = "available"
+            response = await asyncio.to_thread(lambda: gemini_model.generate_content("health check").text)
+            health["gemini"] = "available" if response else "error"
         except Exception as e:
             health["gemini"] = f"error: {str(e)}"
-
-    # Pushover Check
-    pushover_ok = send_pushover_notification("health-check", "Health check notification")
+    pushover_ok = send_pushover_notification("health-check", "Health check")
     health["pushover"] = "connected" if pushover_ok else "unavailable"
-
-    overall_status = "healthy" if all(status == "available" for status in health.values()) else "unhealthy"
-
     return {
-        "status": overall_status,
+        "status": "healthy" if all(status in ["connected", "available"] for status in health.values()) else "unhealthy",
         "services": health,
         "timestamp": datetime.now().isoformat()
     }
+
+# ------------------ FastAPI App ------------------
+app = FastAPI(title="Dhraviq Agentic AI Backend", description="Multi-agent AI", version="1.0.0")
+
+@app.get("/health")
+async def health_endpoint():
+    return await health_check()
+
+@app.post("/run_agents")
+async def run_agents_endpoint(req: AgentRequest):
+    return await run_agents(req)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
