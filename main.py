@@ -1,20 +1,35 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import os
 from dotenv import load_dotenv
+import logging
+import json
 
 # Import functions and initialized clients from agentic_ai_backend.py
-# Firebase initialization and 'db' client will now be handled within agentic_ai_backend.py
 from agentic_ai_backend import (
     run_agents,
     send_pushover_notification,
-    health_check as agent_health_check # Alias to avoid naming conflict with FastAPI's @app.get("/health")
+    health_check as agent_health_check,  # Alias to avoid naming conflict with FastAPI's @app.get("/health")
+    db,  # Firebase client from agentic_ai_backend
+    gemini_model,  # Gemini model from agentic_ai_backend
+    PUSHOVER_TOKEN,
+    PUSHOVER_USER
 )
 
 # ------------------ Load Environment Variables ------------------
-# This should be at the very top to ensure all environment variables are loaded
-# before they are accessed in any imported modules.
 load_dotenv()
+
+# ------------------ Firebase Initialization Check ------------------
+if db is None:
+    raise Exception("Firebase Firestore not initialized. Please check Firebase configuration.")
+
+# ------------------ Gemini API Key Check ------------------
+if not os.getenv("GEMINI_API_KEY"):
+    raise Exception("Gemini API key is missing. Please check environment variables.")
+
+# ------------------ Pushover Token/User Check ------------------
+if not PUSHOVER_TOKEN or not PUSHOVER_USER:
+    raise Exception("Pushover credentials are missing. Please check environment variables.")
 
 # ------------------ FastAPI App ------------------
 app = FastAPI(
@@ -35,19 +50,18 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"], # Allow all methods (GET, POST, etc.)
-    allow_headers=["*"], # Allow all headers, including Content-Type, Authorization
+    allow_methods=["*"],  # Allow all methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allow all headers, including Content-Type, Authorization
 )
 
 # ------------------ Health Check ------------------
-# This health check now calls the one defined in agentic_ai_backend.py
-# which includes checks for Firestore and Pushover
 @app.get("/health", include_in_schema=False)
 @app.head("/health")
 async def health_endpoint():
-    # Call the health check function from agentic_ai_backend
-    return await agent_health_check()
-
+    logging.info("Health check started.")
+    result = await agent_health_check()
+    logging.info(f"Health check result: {result}")
+    return result
 
 # ------------------ Pushover Notification Test ------------------
 @app.get("/test_notification", tags=["Diagnostics"])
@@ -67,9 +81,74 @@ def test_notification_endpoint():
     }
 
 # ------------------ Run Agents Endpoint ------------------
-# The actual logic for run_agents is now fully contained in agentic_ai_backend.py
-# We are simply exposing it as a FastAPI POST endpoint here.
-app.post("/run_agents", tags=["Core Agents"])(run_agents)
+@app.post("/run_agents", tags=["Core Agents"])
+async def run_agents_endpoint(req: AgentRequest):
+    try:
+        # Step 1: Run agents in parallel
+        tasks = [process_agent_response(agent, req.question) for agent in req.agents]
+        results = await asyncio.gather(*tasks)
+        responses = {r["agent"]: r["response"] for r in results}
+
+        # Step 2: Store session as usual
+        session_ref = db.collection("sessions").document()
+        session_data = {
+            "userId": req.userId,
+            "question": req.question,
+            "agents": req.agents,
+            "responses": responses,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "isTechnical": any(r["isTechnical"] for r in results),
+            "technicalKeywords": extract_tech_keywords(req.question)
+        }
+        session_ref.set(session_data)
+
+        # Step 3: If reminders are enabled, save question and send notification
+        if req.send_email:
+            user_ref = db.collection("users").document(req.userId)
+            user_ref.set({
+                "reminderEnabled": True,
+                "reminderQuestion": req.question.strip(),
+                "lastUpdated": firestore.SERVER_TIMESTAMP,
+                "email": req.email if req.email else None
+            }, merge=True)
+
+            logging.info(f"✅ reminderQuestion saved: {req.question}")
+
+            # Send Pushover notification asynchronously
+            asyncio.create_task(
+                send_pushover_notification_async(
+                    req.userId,
+                    req.question,
+                    req.email
+                )
+            )
+
+        return {
+            "status": "success",
+            "sessionId": session_ref.id,
+            "responses": responses
+        }
+
+    except HTTPException:
+        raise  # Re-raise FastAPI HTTPExceptions as-is
+    except Exception as e:
+        logging.error(f"Error occurred during agent processing: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An unexpected server error occurred: {str(e)}")
+
+# ------------------ Async Notification Helper ------------------
+async def send_pushover_notification_async(user_id: str, question: str, email: Optional[str] = None):
+    """Wrapper to run Pushover notification in background"""
+    try:
+        await asyncio.sleep(1)  # Small delay to ensure main request completes first
+        success = send_pushover_notification(user_id, question, email)
+        if not success:
+            logging.error("Pushover notification failed after async attempt")
+    except Exception as e:
+        logging.error(f"Async notification error: {str(e)}")
+        logging.debug(traceback.format_exc())
+
+# ------------------ Logging Setup ------------------
+logging.basicConfig(level=logging.DEBUG)
 
 # ------------------ App Entry Point (for local development) ------------------
 if __name__ == "__main__":
