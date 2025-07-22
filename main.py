@@ -1,11 +1,24 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from agentic_ai_backend import run_agents, send_pushover_notification
+
 import os
 from dotenv import load_dotenv
 
+# Firebase Admin SDK
+import firebase_admin
+from firebase_admin import credentials
+
 # ------------------ Load Environment ------------------
 load_dotenv()
+
+# ------------------ Initialize Firebase ------------------
+FIREBASE_CRED_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH", "dhraviq-firebase-adminsdk-fbsvc-00ee4536d0.json")
+
+# Only initialize once to avoid errors during reloads
+if not firebase_admin._apps:
+    cred = credentials.Certificate(FIREBASE_CRED_PATH)
+    firebase_admin.initialize_app(cred)
 
 # ------------------ FastAPI App ------------------
 app = FastAPI(
@@ -15,7 +28,6 @@ app = FastAPI(
 )
 
 # ------------------ CORS Middleware ------------------
-# Allow both production and local development domains
 ALLOWED_ORIGINS = [
     "https://dhraviq.com",
     "https://www.dhraviq.com",
