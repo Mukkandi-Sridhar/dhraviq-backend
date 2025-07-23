@@ -165,7 +165,7 @@ async def run_agentic_logic(req: AgentRequest) -> Dict:
 
         tasks = [process_agent_response(agent, req.question) for agent in req.agents]
         results = await asyncio.gather(*tasks)
-        responses = {r["agent"]: str(r["response"]) for r in results}
+        responses = {r["agent"]: str(r["response"]) for r in results]
 
         # Store session
         session_ref = db.collection("sessions").document()
@@ -178,20 +178,26 @@ async def run_agentic_logic(req: AgentRequest) -> Dict:
             "isTechnical": any(r["isTechnical"] for r in results),
             "technicalKeywords": extract_tech_keywords(req.question)
         }
-        session_ref.set(session_data)
 
-        # Store reminder preferences and send Pushover
+        try:
+            session_ref.set(session_data)
+        except Exception:
+            print(f"[{datetime.utcnow().isoformat()}] Firebase Error: {traceback.format_exc()}")
+
         if req.send_email:
-            db.collection("users").document(req.userId).set({
-                "reminderEnabled": True,
-                "reminderQuestion": req.question.strip(),
-                "lastUpdated": firestore.SERVER_TIMESTAMP,
-                "email": req.email if req.email else None
-            }, merge=True)
+            try:
+                db.collection("users").document(req.userId).set({
+                    "reminderEnabled": True,
+                    "reminderQuestion": req.question.strip(),
+                    "lastUpdated": firestore.SERVER_TIMESTAMP,
+                    "email": req.email if req.email else None
+                }, merge=True)
 
-            asyncio.create_task(send_pushover_notification_async(
-                req.userId, req.question, req.email
-            ))
+                asyncio.create_task(send_pushover_notification_async(
+                    req.userId, req.question, req.email
+                ))
+            except Exception:
+                print(f"[{datetime.utcnow().isoformat()}] Pushover Error: {traceback.format_exc()}")
 
         return {
             "status": "success",
@@ -202,8 +208,6 @@ async def run_agentic_logic(req: AgentRequest) -> Dict:
     except Exception as e:
         error_id = datetime.utcnow().isoformat()
         print(f"[{error_id}] run_agentic_logic error:\n{traceback.format_exc()}")
-
-        # ✅ Return same structure even on error to prevent frontend crash
         return {
             "status": "success",
             "responses": {
