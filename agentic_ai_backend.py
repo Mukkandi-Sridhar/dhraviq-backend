@@ -3,6 +3,7 @@ from datetime import datetime
 import os
 import asyncio
 import traceback
+import time
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import firestore, credentials
@@ -134,14 +135,16 @@ async def process_agent_response(agent: str, question: str) -> Dict:
             "Your Response:"
         )
 
+        start = time.time()
         response = await asyncio.wait_for(
             asyncio.to_thread(gemini_model.generate_content, prompt, generation_config={
                 "temperature": 0.3,
                 "top_p": 0.95,
                 "max_output_tokens": 2048
             }),
-            timeout=12
+            timeout=10
         )
+        print(f"🕒 Agent {agent} took {time.time() - start:.2f}s")
 
         return {
             "agent": agent,
@@ -149,6 +152,12 @@ async def process_agent_response(agent: str, question: str) -> Dict:
             "isTechnical": True
         }
 
+    except asyncio.TimeoutError:
+        return {
+            "agent": agent,
+            "response": f"⚠️ {agent} is taking too long. Please try again.",
+            "isTechnical": False
+        }
     except Exception as e:
         print(f"[{agent}] Error: {e}")
         return {
@@ -167,23 +176,20 @@ async def run_agentic_logic(req: AgentRequest) -> Dict:
         results = await asyncio.gather(*tasks)
         responses = {r["agent"]: str(r["response"]) for r in results}
 
-
-        # Store session
-        session_ref = db.collection("sessions").document()
-        session_data = {
-            "userId": req.userId,
-            "question": req.question,
-            "agents": req.agents,
-            "responses": responses,
-            "createdAt": firestore.SERVER_TIMESTAMP,
-            "isTechnical": any(r["isTechnical"] for r in results),
-            "technicalKeywords": extract_tech_keywords(req.question)
-        }
-
         try:
+            session_ref = db.collection("sessions").document()
+            session_data = {
+                "userId": req.userId,
+                "question": req.question,
+                "agents": req.agents,
+                "responses": responses,
+                "createdAt": firestore.SERVER_TIMESTAMP,
+                "isTechnical": any(r["isTechnical"] for r in results),
+                "technicalKeywords": extract_tech_keywords(req.question)
+            }
             session_ref.set(session_data)
-        except Exception:
-            print(f"[{datetime.utcnow().isoformat()}] Firebase Error: {traceback.format_exc()}")
+        except Exception as firebase_err:
+            print("⚠️ Firebase error during session logging:", firebase_err)
 
         if req.send_email:
             try:
@@ -193,22 +199,20 @@ async def run_agentic_logic(req: AgentRequest) -> Dict:
                     "lastUpdated": firestore.SERVER_TIMESTAMP,
                     "email": req.email if req.email else None
                 }, merge=True)
-
-                asyncio.create_task(send_pushover_notification_async(
-                    req.userId, req.question, req.email
-                ))
-            except Exception:
-                print(f"[{datetime.utcnow().isoformat()}] Pushover Error: {traceback.format_exc()}")
+                asyncio.create_task(send_pushover_notification_async(req.userId, req.question, req.email))
+            except Exception as firebase_user_err:
+                print("⚠️ Firebase user write error:", firebase_user_err)
 
         return {
             "status": "success",
-            "sessionId": session_ref.id,
+            "sessionId": session_ref.id if 'session_ref' in locals() else None,
             "responses": responses
         }
 
     except Exception as e:
         error_id = datetime.utcnow().isoformat()
         print(f"[{error_id}] run_agentic_logic error:\n{traceback.format_exc()}")
+
         return {
             "status": "success",
             "responses": {
