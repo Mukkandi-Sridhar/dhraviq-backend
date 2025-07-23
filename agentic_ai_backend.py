@@ -3,7 +3,6 @@ from datetime import datetime
 import os
 import asyncio
 import traceback
-import time
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import firestore, credentials
@@ -16,7 +15,6 @@ load_dotenv()
 
 # ------------------ Firebase Initialization ------------------
 firebase_path = "firebase_credentials.json"
-
 if not os.path.exists(firebase_path):
     raise FileNotFoundError(f"Firebase credentials not found at: {firebase_path}")
 
@@ -26,7 +24,8 @@ try:
         firebase_admin.initialize_app(cred)
     db = firestore.client()
 except Exception as e:
-    raise RuntimeError(f"Failed to initialize Firebase: {e}")
+    db = None
+    print(f"❌ Firebase init failed: {e}")
 
 # ------------------ Gemini Model Setup ------------------
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
@@ -36,8 +35,8 @@ gemini_model = genai.GenerativeModel("gemini-1.5-pro")
 PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN")
 PUSHOVER_USER = os.getenv("PUSHOVER_USER")
 
-# ------------------ Agent Roles ------------------
-AGENT_SPECIALIZATIONS = {
+# ------------------ Agent Roles (use dict for fast access) ------------------
+AGENT_SPECIALIZATIONS: Dict[str, Dict[str, str]] = {
     "GoalClarifier": {
         "name": "Goal Clarifier",
         "focus": "Helps users define clear, structured, and meaningful SMART goals.",
@@ -104,13 +103,15 @@ async def send_pushover_notification_async(user_id: str, question: str, email: O
     send_pushover_notification(user_id, question, email)
 
 # ------------------ Keyword Extractor ------------------
+TECH_TERMS_SET = {
+    'python', 'javascript', 'react', 'node', 'django', 'flask',
+    'machine learning', 'ai', 'data science', 'database',
+    'frontend', 'backend', 'fullstack', 'devops'
+}
+
 def extract_tech_keywords(text: str) -> List[str]:
-    tech_terms = [
-        'python', 'javascript', 'react', 'node', 'django', 'flask',
-        'machine learning', 'ai', 'data science', 'database',
-        'frontend', 'backend', 'fullstack', 'devops'
-    ]
-    return [term for term in tech_terms if term in text.lower()]
+    text_lower = text.lower()
+    return [term for term in TECH_TERMS_SET if term in text_lower]
 
 # ------------------ Agent Response Generator ------------------
 async def process_agent_response(agent: str, question: str) -> Dict:
@@ -135,7 +136,6 @@ async def process_agent_response(agent: str, question: str) -> Dict:
             "Your Response:"
         )
 
-        start = time.time()
         response = await asyncio.wait_for(
             asyncio.to_thread(gemini_model.generate_content, prompt, generation_config={
                 "temperature": 0.3,
@@ -144,7 +144,6 @@ async def process_agent_response(agent: str, question: str) -> Dict:
             }),
             timeout=10
         )
-        print(f"🕒 Agent {agent} took {time.time() - start:.2f}s")
 
         return {
             "agent": agent,
@@ -152,12 +151,6 @@ async def process_agent_response(agent: str, question: str) -> Dict:
             "isTechnical": True
         }
 
-    except asyncio.TimeoutError:
-        return {
-            "agent": agent,
-            "response": f"⚠️ {agent} is taking too long. Please try again.",
-            "isTechnical": False
-        }
     except Exception as e:
         print(f"[{agent}] Error: {e}")
         return {
@@ -176,36 +169,42 @@ async def run_agentic_logic(req: AgentRequest) -> Dict:
         results = await asyncio.gather(*tasks)
         responses = {r["agent"]: str(r["response"]) for r in results}
 
+        # Store session (ignore Firebase failure)
         try:
-            session_ref = db.collection("sessions").document()
-            session_data = {
-                "userId": req.userId,
-                "question": req.question,
-                "agents": req.agents,
-                "responses": responses,
-                "createdAt": firestore.SERVER_TIMESTAMP,
-                "isTechnical": any(r["isTechnical"] for r in results),
-                "technicalKeywords": extract_tech_keywords(req.question)
-            }
-            session_ref.set(session_data)
-        except Exception as firebase_err:
-            print("⚠️ Firebase error during session logging:", firebase_err)
+            if db:
+                session_ref = db.collection("sessions").document()
+                session_data = {
+                    "userId": req.userId,
+                    "question": req.question,
+                    "agents": req.agents,
+                    "responses": responses,
+                    "createdAt": firestore.SERVER_TIMESTAMP,
+                    "isTechnical": any(r["isTechnical"] for r in results),
+                    "technicalKeywords": extract_tech_keywords(req.question)
+                }
+                session_ref.set(session_data)
+        except Exception as log_err:
+            print(f"⚠️ Firebase session logging failed: {log_err}")
 
+        # Store user email preference and notify
         if req.send_email:
             try:
-                db.collection("users").document(req.userId).set({
-                    "reminderEnabled": True,
-                    "reminderQuestion": req.question.strip(),
-                    "lastUpdated": firestore.SERVER_TIMESTAMP,
-                    "email": req.email if req.email else None
-                }, merge=True)
-                asyncio.create_task(send_pushover_notification_async(req.userId, req.question, req.email))
-            except Exception as firebase_user_err:
-                print("⚠️ Firebase user write error:", firebase_user_err)
+                if db:
+                    db.collection("users").document(req.userId).set({
+                        "reminderEnabled": True,
+                        "reminderQuestion": req.question.strip(),
+                        "lastUpdated": firestore.SERVER_TIMESTAMP,
+                        "email": req.email if req.email else None
+                    }, merge=True)
+                asyncio.create_task(send_pushover_notification_async(
+                    req.userId, req.question, req.email
+                ))
+            except Exception as email_log_err:
+                print(f"⚠️ Firebase email logging failed: {email_log_err}")
 
         return {
             "status": "success",
-            "sessionId": session_ref.id if 'session_ref' in locals() else None,
+            "sessionId": datetime.utcnow().isoformat(),
             "responses": responses
         }
 
