@@ -2,7 +2,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Optional
 import os
 from dotenv import load_dotenv
 from datetime import datetime
@@ -11,7 +11,7 @@ import traceback
 # Load environment variables
 load_dotenv()
 
-# Firebase (safe initialization)
+# ------------------ Firebase Initialization ------------------
 try:
     import firebase_admin
     from firebase_admin import credentials, firestore
@@ -33,50 +33,44 @@ except Exception as e:
 # ------------------ Request Schema ------------------
 class RunAgentRequest(BaseModel):
     user_id: str
-    goals: Optional[List[str]] = None
+    message: str
     email: Optional[str] = None
 
-# ------------------ Simulated Agent Runner ------------------
-def agentic_workflow(user_id: str, goals: Optional[List[str]]):
-    # Simulated agents
-    agents = [
-        {"agent": "GoalClarifier", "response": f"Clarified goals for {user_id}"},
-        {"agent": "TimelineWizard", "response": "Suggested roadmap with milestones."}
-    ]
+# ------------------ Simulated Agent Handler ------------------
+def agentic_workflow(user_id: str, message: str):
+    # Simulate an agent response
+    response_text = f"Hi {user_id}, you said: '{message}'"
 
-    # Attempt to store session in Firestore
+    # Try saving to Firestore
     if db:
         try:
-            doc_ref = db.collection("sessions").document()
-            doc_ref.set({
+            db.collection("sessions").document().set({
                 "userId": user_id,
-                "goals": goals or ["Default goal"],
-                "agents": [a["agent"] for a in agents],
-                "responses": {a["agent"]: a["response"] for a in agents},
+                "message": message,
+                "response": response_text,
                 "createdAt": datetime.utcnow()
             })
-            print("✅ Session stored in Firestore.")
+            print("✅ Message stored in Firestore.")
         except Exception as e:
-            print(f"⚠️ Error writing to Firestore:\n{traceback.format_exc()}")
+            print(f"⚠️ Firestore write failed:\n{traceback.format_exc()}")
     else:
-        print("⚠️ Firebase is not connected. Skipping session save.")
+        print("⚠️ Firebase not connected. Skipping Firestore save.")
 
     return {
         "user_id": user_id,
-        "goals": goals or ["Default goal"],
-        "results": agents,
-        "status": "success",
-        "message": "Agents ran successfully!"
+        "message": message,
+        "response": response_text,
+        "status": "success"
     }
 
 # ------------------ FastAPI App ------------------
 app = FastAPI(
     title="Dhraviq Agentic AI Backend",
-    description="Multi-agent orchestration using Gemini, Firestore & Pushover",
-    version="1.0.0"
+    description="Accepts chat messages, responds, and stores them if Firebase is available.",
+    version="2.0.0"
 )
 
-# ------------------ CORS ------------------
+# ------------------ CORS Settings ------------------
 ALLOWED_ORIGINS = [
     "https://dhraviq.com",
     "https://www.dhraviq.com",
@@ -101,12 +95,12 @@ def health_check():
         "message": "Dhraviq backend is live 🔥"
     }
 
-# ------------------ Core Run Agents Endpoint ------------------
+# ------------------ POST /run_agents Endpoint ------------------
 @app.post("/run_agents", tags=["Core Agents"])
 async def run_agents(data: RunAgentRequest):
     try:
-        result = agentic_workflow(user_id=data.user_id, goals=data.goals)
+        result = agentic_workflow(user_id=data.user_id, message=data.message)
         return result
     except Exception as e:
-        print(f"❌ Unexpected error in /run_agents:\n{traceback.format_exc()}")
-        raise HTTPException(500, detail="Something went wrong while running agents.")
+        print(f"❌ Error in /run_agents:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Internal server error. Please try again.")
