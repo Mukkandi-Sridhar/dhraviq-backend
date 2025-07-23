@@ -38,10 +38,10 @@ class RunAgentRequest(BaseModel):
 
 # ------------------ Simulated Agent Handler ------------------
 def agentic_workflow(user_id: str, message: str):
-    # Simulate an agent response
+    # Simulated agent logic
     response_text = f"Hi {user_id}, you said: '{message}'"
 
-    # Try saving to Firestore
+    # Firestore save attempt
     if db:
         try:
             db.collection("sessions").document().set({
@@ -66,11 +66,11 @@ def agentic_workflow(user_id: str, message: str):
 # ------------------ FastAPI App ------------------
 app = FastAPI(
     title="Dhraviq Agentic AI Backend",
-    description="Accepts chat messages, responds, and stores them if Firebase is available.",
-    version="2.0.0"
+    description="Handles chat messages and stores sessions in Firestore if available.",
+    version="2.0.1"
 )
 
-# ------------------ CORS Settings ------------------
+# ------------------ CORS Middleware ------------------
 ALLOWED_ORIGINS = [
     "https://dhraviq.com",
     "https://www.dhraviq.com",
@@ -95,7 +95,7 @@ def health_check():
         "message": "Dhraviq backend is live 🔥"
     }
 
-# ------------------ POST /run_agents Endpoint ------------------
+# ------------------ Main Endpoint ------------------
 @app.post("/run_agents", tags=["Core Agents"])
 async def run_agents(data: RunAgentRequest):
     try:
