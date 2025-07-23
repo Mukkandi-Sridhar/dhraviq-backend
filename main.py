@@ -1,12 +1,11 @@
-# main.py
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
-import os
-from dotenv import load_dotenv
+from typing import List, Optional
 from datetime import datetime
 import traceback
+import os
+from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
@@ -26,48 +25,48 @@ try:
     else:
         print(f"❌ Firebase credential file not found at: {cred_path}")
         db = None
-except Exception as e:
+except Exception:
     print(f"🔥 Firebase initialization failed:\n{traceback.format_exc()}")
     db = None
 
 # ------------------ Request Schema ------------------
 class RunAgentRequest(BaseModel):
-    user_id: str
-    message: str
+    userId: str
+    question: str
+    agents: List[str]
     email: Optional[str] = None
+    send_email: Optional[bool] = False
 
 # ------------------ Simulated Agent Handler ------------------
-def agentic_workflow(user_id: str, message: str):
-    # Simulated agent logic
-    response_text = f"Hi {user_id}, you said: '{message}'"
+def agentic_workflow(user_id: str, question: str, agents: List[str]) -> dict:
+    responses = {}
 
-    # Firestore save attempt
+    for agent in agents:
+        responses[agent] = f"✅ {agent} received your query: '{question}'"
+
+    # Firestore write
     if db:
         try:
-            db.collection("sessions").document().set({
+            db.collection("sessions").add({
                 "userId": user_id,
-                "message": message,
-                "response": response_text,
+                "question": question,
+                "agents": agents,
+                "responses": responses,
+                "email": None,
+                "send_email": False,
                 "createdAt": datetime.utcnow()
             })
-            print("✅ Message stored in Firestore.")
-        except Exception as e:
-            print(f"⚠️ Firestore write failed:\n{traceback.format_exc()}")
-    else:
-        print("⚠️ Firebase not connected. Skipping Firestore save.")
+            print("✅ Firestore logged the session.")
+        except Exception:
+            print(f"⚠️ Firestore logging failed:\n{traceback.format_exc()}")
 
-    return {
-        "user_id": user_id,
-        "message": message,
-        "response": response_text,
-        "status": "success"
-    }
+    return {"responses": responses}
 
 # ------------------ FastAPI App ------------------
 app = FastAPI(
     title="Dhraviq Agentic AI Backend",
-    description="Handles chat messages and stores sessions in Firestore if available.",
-    version="2.0.1"
+    description="Handles multi-agent chat and logs sessions",
+    version="2.1.0"
 )
 
 # ------------------ CORS Middleware ------------------
@@ -95,12 +94,13 @@ def health_check():
         "message": "Dhraviq backend is live 🔥"
     }
 
-# ------------------ Main Endpoint ------------------
+# ------------------ Core Endpoint ------------------
 @app.post("/run_agents", tags=["Core Agents"])
-async def run_agents(data: RunAgentRequest):
+async def run_agents(data: RunAgentRequest, authorization: Optional[str] = Header(None)):
     try:
-        result = agentic_workflow(user_id=data.user_id, message=data.message)
+        print(f"📩 Incoming request from: {data.userId} | Agents: {data.agents}")
+        result = agentic_workflow(data.userId, data.question, data.agents)
         return result
-    except Exception as e:
-        print(f"❌ Error in /run_agents:\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail="Internal server error. Please try again.")
+    except Exception:
+        print(f"❌ Exception in /run_agents:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Internal server error")
