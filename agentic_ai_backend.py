@@ -1,15 +1,14 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 from typing import List, Optional, Dict
-import asyncio
+from datetime import datetime
 import os
+import asyncio
 import traceback
 from dotenv import load_dotenv
-from datetime import datetime
 import firebase_admin
-from firebase_admin import firestore, initialize_app, credentials
+from firebase_admin import firestore, credentials
 import google.generativeai as genai
 import requests
+from pydantic import BaseModel
 
 # ------------------ Load Environment ------------------
 load_dotenv()
@@ -35,21 +34,6 @@ gemini_model = genai.GenerativeModel("gemini-1.5-pro")
 # ------------------ Pushover Configuration ------------------
 PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN")
 PUSHOVER_USER = os.getenv("PUSHOVER_USER")
-
-# ------------------ FastAPI App ------------------
-app = FastAPI(
-    title="Dhraviq AI Backend",
-    version="5.1",
-    description="Fast agentic backend with 5 agents and Pushover notifications"
-)
-
-# ------------------ Request Schema ------------------
-class AgentRequest(BaseModel):
-    userId: str
-    question: str
-    agents: List[str]
-    email: Optional[str] = None
-    send_email: Optional[bool] = False
 
 # ------------------ Agent Roles ------------------
 AGENT_SPECIALIZATIONS = {
@@ -80,7 +64,15 @@ AGENT_SPECIALIZATIONS = {
     }
 }
 
-# ------------------ Pushover Notification ------------------
+# ------------------ Pydantic Request Schema ------------------
+class AgentRequest(BaseModel):
+    userId: str
+    question: str
+    agents: List[str]
+    email: Optional[str] = None
+    send_email: Optional[bool] = False
+
+# ------------------ Notification ------------------
 def send_pushover_notification(user_id: str, question: str, email: Optional[str] = None):
     try:
         message = f"New question from user {user_id}:\n\n{question}"
@@ -153,7 +145,7 @@ async def process_agent_response(agent: str, question: str) -> Dict:
 
         return {
             "agent": agent,
-            "response": response.text,
+            "response": getattr(response, "text", "⚠️ No response returned."),
             "isTechnical": True
         }
 
@@ -165,17 +157,14 @@ async def process_agent_response(agent: str, question: str) -> Dict:
             "isTechnical": False
         }
 
-# ------------------ Main Endpoint ------------------
-@app.post("/run_agents")
-async def run_agents(req: AgentRequest):
+# ------------------ Main Logic Function (exported to main.py) ------------------
+async def run_agentic_logic(req: AgentRequest) -> Dict:
     try:
         if len(req.agents) > 5:
-            raise HTTPException(status_code=400, detail="Maximum 5 agents allowed.")
+            raise ValueError("Maximum 5 agents allowed.")
 
-        # Run all agents in parallel
         tasks = [process_agent_response(agent, req.question) for agent in req.agents]
         results = await asyncio.gather(*tasks)
-
         responses = {r["agent"]: r["response"] for r in results}
 
         # Store session
@@ -191,7 +180,7 @@ async def run_agents(req: AgentRequest):
         }
         session_ref.set(session_data)
 
-        # If reminder/email is set
+        # Store reminder preferences and send Pushover
         if req.send_email:
             db.collection("users").document(req.userId).set({
                 "reminderEnabled": True,
@@ -212,37 +201,9 @@ async def run_agents(req: AgentRequest):
 
     except Exception as e:
         error_id = datetime.utcnow().isoformat()
-        print(f"[{error_id}] run_agents error:\n{traceback.format_exc()}")
+        print(f"[{error_id}] run_agentic_logic error:\n{traceback.format_exc()}")
         return {
             "status": "error",
             "message": "Something went wrong while processing your request.",
             "error_id": error_id
         }
-
-# ------------------ Health Check ------------------
-@app.get("/health")
-async def health_check():
-    try:
-        db.collection("health").document("check").set({
-            "timestamp": firestore.SERVER_TIMESTAMP
-        })
-
-        pushover_ok = send_pushover_notification(
-            "health-check", "Test from health endpoint", "health@example.com"
-        )
-
-        return {
-            "status": "healthy",
-            "services": {
-                "firestore": "connected",
-                "gemini": "available",
-                "pushover": "connected" if pushover_ok else "unavailable"
-            }
-        }
-    except Exception as e:
-        raise HTTPException(500, detail=f"Health check failed: {str(e)}")
-
-# ------------------ Run with Uvicorn ------------------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
