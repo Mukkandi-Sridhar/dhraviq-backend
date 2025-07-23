@@ -165,7 +165,8 @@ async def run_agentic_logic(req: AgentRequest) -> Dict:
 
         tasks = [process_agent_response(agent, req.question) for agent in req.agents]
         results = await asyncio.gather(*tasks)
-        responses = {r["agent"]: str(r["response"]) for r in results]
+        responses = {r["agent"]: str(r["response"]) for r in results}
+
 
         # Store session
         session_ref = db.collection("sessions").document()
