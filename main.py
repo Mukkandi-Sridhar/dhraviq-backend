@@ -32,7 +32,8 @@ except Exception:
 # ------------------ Import Logic Handler ------------------
 # This is where your real agent logic will be handled
 # Make sure this file exists and exports run_agentic_logic()
-from agentic_ai import run_agentic_logic  # You’ll define this next
+from agentic_ai_backend import run_agentic_logic
+
 
 # ------------------ Request Schema ------------------
 class RunAgentRequest(BaseModel):
