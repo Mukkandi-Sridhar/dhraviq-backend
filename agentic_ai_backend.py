@@ -157,7 +157,7 @@ async def process_agent_response(agent: str, question: str) -> Dict:
             "isTechnical": False
         }
 
-# ------------------ Main Logic Function (exported to main.py) ------------------
+# ------------------ Main Logic Function ------------------
 async def run_agentic_logic(req: AgentRequest) -> Dict:
     try:
         if len(req.agents) > 5:
@@ -165,7 +165,7 @@ async def run_agentic_logic(req: AgentRequest) -> Dict:
 
         tasks = [process_agent_response(agent, req.question) for agent in req.agents]
         results = await asyncio.gather(*tasks)
-        responses = {r["agent"]: r["response"] for r in results}
+        responses = {r["agent"]: str(r["response"]) for r in results}
 
         # Store session
         session_ref = db.collection("sessions").document()
@@ -202,8 +202,11 @@ async def run_agentic_logic(req: AgentRequest) -> Dict:
     except Exception as e:
         error_id = datetime.utcnow().isoformat()
         print(f"[{error_id}] run_agentic_logic error:\n{traceback.format_exc()}")
+
+        # ✅ Return same structure even on error to prevent frontend crash
         return {
-            "status": "error",
-            "message": "Something went wrong while processing your request.",
-            "error_id": error_id
+            "status": "success",
+            "responses": {
+                "System": f"⚠️ Something went wrong. Please try again later. (Error ID: {error_id})"
+            }
         }
