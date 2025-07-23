@@ -29,6 +29,11 @@ except Exception:
     print(f"🔥 Firebase initialization failed:\n{traceback.format_exc()}")
     db = None
 
+# ------------------ Import Logic Handler ------------------
+# This is where your real agent logic will be handled
+# Make sure this file exists and exports run_agentic_logic()
+from agentic_ai import run_agentic_logic  # You’ll define this next
+
 # ------------------ Request Schema ------------------
 class RunAgentRequest(BaseModel):
     userId: str
@@ -37,36 +42,11 @@ class RunAgentRequest(BaseModel):
     email: Optional[str] = None
     send_email: Optional[bool] = False
 
-# ------------------ Simulated Agent Handler ------------------
-def agentic_workflow(user_id: str, question: str, agents: List[str]) -> dict:
-    responses = {}
-
-    for agent in agents:
-        responses[agent] = f"✅ {agent} received your query: '{question}'"
-
-    # Firestore write
-    if db:
-        try:
-            db.collection("sessions").add({
-                "userId": user_id,
-                "question": question,
-                "agents": agents,
-                "responses": responses,
-                "email": None,
-                "send_email": False,
-                "createdAt": datetime.utcnow()
-            })
-            print("✅ Firestore logged the session.")
-        except Exception:
-            print(f"⚠️ Firestore logging failed:\n{traceback.format_exc()}")
-
-    return {"responses": responses}
-
 # ------------------ FastAPI App ------------------
 app = FastAPI(
-    title="Dhraviq Agentic AI Backend",
-    description="Handles multi-agent chat and logs sessions",
-    version="2.1.0"
+    title="Dhraviq Agentic AI Gateway",
+    description="Routes requests to agent logic and logs sessions",
+    version="2.2.0"
 )
 
 # ------------------ CORS Middleware ------------------
@@ -91,7 +71,7 @@ def health_check():
     return {
         "status": "OK",
         "firebase": "connected" if db else "not connected",
-        "message": "Dhraviq backend is live 🔥"
+        "message": "Dhraviq gateway is live 🔥"
     }
 
 # ------------------ Core Endpoint ------------------
@@ -99,7 +79,7 @@ def health_check():
 async def run_agents(data: RunAgentRequest, authorization: Optional[str] = Header(None)):
     try:
         print(f"📩 Incoming request from: {data.userId} | Agents: {data.agents}")
-        result = agentic_workflow(data.userId, data.question, data.agents)
+        result = await run_agentic_logic(data)  # Call external logic
         return result
     except Exception:
         print(f"❌ Exception in /run_agents:\n{traceback.format_exc()}")
