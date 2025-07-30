@@ -1,8 +1,6 @@
 from typing import List, Optional, Dict
 from datetime import datetime
-import os
-import asyncio
-import traceback
+import os, asyncio, traceback, time
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import firestore, credentials
@@ -10,61 +8,56 @@ import google.generativeai as genai
 import requests
 from pydantic import BaseModel
 
-# ------------------ Load Environment ------------------
 load_dotenv()
 
-# ------------------ Firebase Initialization ------------------
+# Firebase Setup
 firebase_path = "firebase_credentials.json"
-if not os.path.exists(firebase_path):
-    raise FileNotFoundError(f"Firebase credentials not found at: {firebase_path}")
-
-try:
+if os.path.exists(firebase_path):
     cred = credentials.Certificate(firebase_path)
     if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
     db = firestore.client()
-except Exception as e:
+else:
+    print(f"❌ Firebase credentials missing: {firebase_path}")
     db = None
-    print(f"❌ Firebase init failed: {e}")
 
-# ------------------ Gemini Model Setup ------------------
+# Gemini API
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 gemini_model = genai.GenerativeModel("gemini-1.5-pro")
 
-# ------------------ Pushover Configuration ------------------
+# Pushover
 PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN")
 PUSHOVER_USER = os.getenv("PUSHOVER_USER")
 
-# ------------------ Agent Roles (use dict for fast access) ------------------
-AGENT_SPECIALIZATIONS: Dict[str, Dict[str, str]] = {
+# Agent Roles
+AGENT_SPECIALIZATIONS = {
     "GoalClarifier": {
         "name": "Goal Clarifier",
-        "focus": "Helps users define clear, structured, and meaningful SMART goals.",
-        "technical": "Breaks down ambitions into SMART components using goal-setting frameworks."
+        "focus": "Helps users define SMART goals.",
+        "technical": "Breaks down ambitions using goal frameworks."
     },
     "SkillMap": {
         "name": "Skill Map",
-        "focus": "Identifies skills required for success in a chosen goal or field.",
-        "technical": "Maps out gaps and recommends courses, books, and learning paths."
+        "focus": "Identifies skills needed for success.",
+        "technical": "Maps learning paths, courses, and gaps."
     },
     "TimelineWizard": {
         "name": "Timeline Wizard",
-        "focus": "Creates realistic timelines to achieve goals.",
-        "technical": "Uses sprints, time-blocking, and backward planning with buffer periods."
+        "focus": "Creates realistic timelines to reach goals.",
+        "technical": "Uses sprints, time-blocking, and planning."
     },
     "ProgressCoach": {
         "name": "Progress Coach",
-        "focus": "Tracks execution and sustains consistency.",
-        "technical": "Applies habit tracking, review loops, and adaptive feedback."
+        "focus": "Monitors execution and keeps momentum.",
+        "technical": "Applies habit tracking and feedback."
     },
     "MindsetMentor": {
         "name": "Mindset Mentor",
-        "focus": "Builds discipline and mental resilience.",
-        "technical": "Uses CBT tools, identity shifts, and habit reinforcement techniques."
+        "focus": "Builds mental resilience.",
+        "technical": "Uses CBT and habit reinforcement tools."
     }
 }
 
-# ------------------ Pydantic Request Schema ------------------
 class AgentRequest(BaseModel):
     userId: str
     question: str
@@ -72,19 +65,17 @@ class AgentRequest(BaseModel):
     email: Optional[str] = None
     send_email: Optional[bool] = False
 
-# ------------------ Notification ------------------
-def send_pushover_notification(user_id: str, question: str, email: Optional[str] = None):
+def send_pushover_notification(user_id, question, email=None):
     try:
-        message = f"New question from user {user_id}:\n\n{question}"
+        msg = f"New question from {user_id}:\n\n{question}"
         if email:
-            message += f"\n\nEmail: {email}"
-
-        response = requests.post(
+            msg += f"\n\nEmail: {email}"
+        requests.post(
             "https://api.pushover.net/1/messages.json",
             data={
                 "token": PUSHOVER_TOKEN,
                 "user": PUSHOVER_USER,
-                "message": message,
+                "message": msg,
                 "title": "New User Question",
                 "priority": 0,
                 "sound": "magic",
@@ -92,17 +83,13 @@ def send_pushover_notification(user_id: str, question: str, email: Optional[str]
             },
             timeout=10
         )
-        response.raise_for_status()
-        return True
     except Exception as e:
         print(f"Pushover failed: {e}")
-        return False
 
-async def send_pushover_notification_async(user_id: str, question: str, email: Optional[str] = None):
+async def send_pushover_notification_async(user_id, question, email=None):
     await asyncio.sleep(1)
     send_pushover_notification(user_id, question, email)
 
-# ------------------ Keyword Extractor ------------------
 TECH_TERMS_SET = {
     'python', 'javascript', 'react', 'node', 'django', 'flask',
     'machine learning', 'ai', 'data science', 'database',
@@ -113,26 +100,25 @@ def extract_tech_keywords(text: str) -> List[str]:
     text_lower = text.lower()
     return [term for term in TECH_TERMS_SET if term in text_lower]
 
-# ------------------ Agent Response Generator ------------------
 async def process_agent_response(agent: str, question: str) -> Dict:
     try:
-        specialization = AGENT_SPECIALIZATIONS.get(agent, {
+        start_time = time.time()
+        spec = AGENT_SPECIALIZATIONS.get(agent, {
             "name": agent,
-            "focus": "General guidance",
-            "technical": "Provide thoughtful advice"
+            "focus": "General support",
+            "technical": "Provide helpful guidance"
         })
 
         prompt = (
-            f"You are an expert agent named {specialization['name']}.\n"
-            f"Specialization: {specialization['focus']}\n"
-            f"Technical Role: {specialization['technical']}\n\n"
+            f"You are {spec['name']}.\n"
+            f"Focus: {spec['focus']}\n"
+            f"Technical Role: {spec['technical']}\n\n"
             f"User Input: \"{question.strip()}\"\n\n"
             "Instructions:\n"
-            "- If it's a greeting, give a short intro.\n"
-            "- If it's a specific question, respond with detailed markdown advice.\n"
-            "- Only focus on your role. No general answers.\n"
-            "- Use markdown: **bold**, bullet points, numbered steps, etc.\n"
-            "- Stay professional.\n\n"
+            "- Respond only in your role.\n"
+            "- Use markdown (bold, lists, etc).\n"
+            "- Stay focused and professional.\n"
+            "- Intro for greetings, guidance for questions.\n\n"
             "Your Response:"
         )
 
@@ -142,12 +128,15 @@ async def process_agent_response(agent: str, question: str) -> Dict:
                 "top_p": 0.95,
                 "max_output_tokens": 2048
             }),
-            timeout=10
+            timeout=15
         )
+
+        duration = time.time() - start_time
+        print(f"[{agent}] Gemini response time: {duration:.2f}s")
 
         return {
             "agent": agent,
-            "response": getattr(response, "text", "⚠️ No response returned."),
+            "response": getattr(response, "text", "⚠️ No response."),
             "isTechnical": True
         }
 
@@ -155,11 +144,10 @@ async def process_agent_response(agent: str, question: str) -> Dict:
         print(f"[{agent}] Error: {e}")
         return {
             "agent": agent,
-            "response": f"⚠️ {agent} is currently unavailable. Try again later.",
+            "response": f"⚠️ {agent} is currently unavailable.",
             "isTechnical": False
         }
 
-# ------------------ Main Logic Function ------------------
 async def run_agentic_logic(req: AgentRequest) -> Dict:
     try:
         if len(req.agents) > 5:
@@ -169,11 +157,9 @@ async def run_agentic_logic(req: AgentRequest) -> Dict:
         results = await asyncio.gather(*tasks)
         responses = {r["agent"]: str(r["response"]) for r in results}
 
-        # Store session (ignore Firebase failure)
-        try:
-            if db:
-                session_ref = db.collection("sessions").document()
-                session_data = {
+        if db:
+            try:
+                db.collection("sessions").document().set({
                     "userId": req.userId,
                     "question": req.question,
                     "agents": req.agents,
@@ -181,26 +167,19 @@ async def run_agentic_logic(req: AgentRequest) -> Dict:
                     "createdAt": firestore.SERVER_TIMESTAMP,
                     "isTechnical": any(r["isTechnical"] for r in results),
                     "technicalKeywords": extract_tech_keywords(req.question)
-                }
-                session_ref.set(session_data)
-        except Exception as log_err:
-            print(f"⚠️ Firebase session logging failed: {log_err}")
+                })
+            except Exception as log_err:
+                print(f"⚠️ Firebase logging failed: {log_err}")
 
-        # Store user email preference and notify
         if req.send_email:
-            try:
-                if db:
-                    db.collection("users").document(req.userId).set({
-                        "reminderEnabled": True,
-                        "reminderQuestion": req.question.strip(),
-                        "lastUpdated": firestore.SERVER_TIMESTAMP,
-                        "email": req.email if req.email else None
-                    }, merge=True)
-                asyncio.create_task(send_pushover_notification_async(
-                    req.userId, req.question, req.email
-                ))
-            except Exception as email_log_err:
-                print(f"⚠️ Firebase email logging failed: {email_log_err}")
+            if db:
+                db.collection("users").document(req.userId).set({
+                    "reminderEnabled": True,
+                    "reminderQuestion": req.question.strip(),
+                    "lastUpdated": firestore.SERVER_TIMESTAMP,
+                    "email": req.email if req.email else None
+                }, merge=True)
+            asyncio.create_task(send_pushover_notification_async(req.userId, req.question, req.email))
 
         return {
             "status": "success",
@@ -210,11 +189,10 @@ async def run_agentic_logic(req: AgentRequest) -> Dict:
 
     except Exception as e:
         error_id = datetime.utcnow().isoformat()
-        print(f"[{error_id}] run_agentic_logic error:\n{traceback.format_exc()}")
-
+        print(f"[{error_id}] Critical error:\n{traceback.format_exc()}")
         return {
-            "status": "success",
+            "status": "failure",
             "responses": {
-                "System": f"⚠️ Something went wrong. Please try again later. (Error ID: {error_id})"
+                "System": f"⚠️ Internal error occurred. Try again. (Error ID: {error_id})"
             }
         }
